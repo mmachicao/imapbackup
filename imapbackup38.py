@@ -48,6 +48,7 @@ __contributors__ = """jwagnerhki, Bob Ippolito, Michael Leonhard,
 # - Support host:port
 # - Cleaned up code using PyLint to identify problems
 #   pylint -f html --indent-string="  " --max-line-length=90 imapbackup.py > report.html
+import datetime
 import getpass
 import os
 import gc
@@ -69,10 +70,14 @@ from dataclasses import dataclass
 
 # constants used for sqlite3
 SQLITE3_DATABASE_NAME = "message_ids.db"
-SQL_CREATE_MESSAGE_TABLE_IF_MISSING = "CREATE TABLE IF NOT EXISTS messages (message_id TEXT, imapfolder TEXT, mailbox TEXT)"
+SQL_CREATE_MESSAGE_TABLE_IF_MISSING = "CREATE TABLE IF NOT EXISTS messages (message_id TEXT, imapfolder TEXT, mailbox TEXT, created TEXT)"
 SQL_CREATE_MESSAGE_INDEX_IF_MISSING = "CREATE INDEX IF NOT EXISTS idx_ids ON messages (imapfolder)"
+
+SQL_ADD_COLUMN_MESSAGES_CREATED = "ALTER TABLE messages ADD COLUMN created TEXT"
+FORMAT_MESSAGES_CREATED = "%Y-%m-%d--%H-%M-%S"
+
 SQL_SELECT_MESSAGE_IDS = "SELECT message_id FROM messages WHERE imapfolder = ?"
-SQL_INSERT_MESSAGE_ID = "INSERT INTO messages (message_id, imapfolder, mailbox) VALUES (?, ?, ?)"
+SQL_INSERT_MESSAGE_ID = "INSERT INTO messages (message_id, imapfolder, mailbox, created) VALUES (?, ?, ?, ?)"
 SQL_DELETE_MESSAGE_IDS = "DELETE FROM messages WHERE imapfolder = ?"
 
 
@@ -280,7 +285,8 @@ def download_messages(server : imaplib.IMAP4, imapfolder : str, mailboxfile: str
                 mboxfile.write(b"\n\n")
 
                 # register downloaded message_id in the database
-                cursor.execute(SQL_INSERT_MESSAGE_ID, (msg_id, imapfolder, mailboxfile))
+                created = datetime.datetime.now().strftime(FORMAT_MESSAGES_CREATED)
+                cursor.execute(SQL_INSERT_MESSAGE_ID, (msg_id, imapfolder, mailboxfile, created))
 
                 size = len(text_bytes)
                 biggest = max(size, biggest)
@@ -931,14 +937,11 @@ def create_folder_structure(names: list, basedir: str) -> bool:
 
     return True
 
-def create_database(basedir : str) -> bool:
+def initialize_database(basedir : str) -> bool:
     """ Create and initialize the message database
     Return false on errors
     """
     dbfullname = os.path.join(basedir, SQLITE3_DATABASE_NAME)
-
-    if os.path.exists(dbfullname):
-        return True
 
     try:
         logging.debug("INIT: initializing database")
@@ -947,6 +950,10 @@ def create_database(basedir : str) -> bool:
         cursor = connection.cursor()
         cursor.execute(SQL_CREATE_MESSAGE_TABLE_IF_MISSING)
         cursor.execute(SQL_CREATE_MESSAGE_INDEX_IF_MISSING)
+
+        if not has_column("created", "messages", cursor):
+            cursor.execute(SQL_ADD_COLUMN_MESSAGES_CREATED)
+
         cursor.close()
         return True
     except Exception as ex:
@@ -955,6 +962,16 @@ def create_database(basedir : str) -> bool:
     finally:
         if connection is not None:
             connection.close()
+
+
+def has_column(column_name: str, table_name: str, cursor: sqlite3.Cursor) -> bool:
+    """Return True, if table has column"""
+
+    PRAGMA_COLUMN_IN_TABLE = "SELECT name from PRAGMA_table_info(?) where name = ?;"
+    for ritem in cursor.execute(PRAGMA_COLUMN_IN_TABLE, (table_name, column_name)):
+        if ritem[0] == column_name:
+            return True
+    return False
 
 
 def main():
@@ -1039,9 +1056,10 @@ def main():
             logging.error(msg)
             print(f"ERROR: {msg}")
             sys.exit(-1)
-        # create and initialize
-        if not create_database(basedir):
-            msg = f"Failed to create/open message_ids database in: {opts.basedir}"
+        
+        # create and initialize 
+        if not initialize_database(basedir):
+            msg = f"Failed to initialize message_ids database in: {opts.basedir}"
             logging.error(msg)
             print(f"ERROR: {msg}")
             sys.exit(-1)
